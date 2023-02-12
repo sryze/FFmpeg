@@ -1,5 +1,5 @@
 /*
- * H261 decoder
+ * H.261 decoder
  * Copyright (c) 2002-2004 Michael Niedermayer <michaelni@gmx.at>
  * Copyright (c) 2004 Maarten Daniels
  *
@@ -26,6 +26,7 @@
  */
 
 #include "libavutil/avassert.h"
+#include "libavutil/thread.h"
 #include "avcodec.h"
 #include "mpeg_er.h"
 #include "mpegutils.h"
@@ -34,7 +35,7 @@
 #include "h261.h"
 #include "internal.h"
 
-#define H261_MBA_VLC_BITS 9
+#define H261_MBA_VLC_BITS 8
 #define H261_MTYPE_VLC_BITS 6
 #define H261_MV_VLC_BITS 7
 #define H261_CBP_VLC_BITS 9
@@ -47,48 +48,39 @@ static VLC h261_mtype_vlc;
 static VLC h261_mv_vlc;
 static VLC h261_cbp_vlc;
 
-static av_cold void h261_decode_init_vlc(H261Context *h)
+static av_cold void h261_decode_init_static(void)
 {
-    static int done = 0;
-
-    if (!done) {
-        done = 1;
-        INIT_VLC_STATIC(&h261_mba_vlc, H261_MBA_VLC_BITS, 35,
-                        ff_h261_mba_bits, 1, 1,
-                        ff_h261_mba_code, 1, 1, 662);
-        INIT_VLC_STATIC(&h261_mtype_vlc, H261_MTYPE_VLC_BITS, 10,
-                        ff_h261_mtype_bits, 1, 1,
-                        ff_h261_mtype_code, 1, 1, 80);
-        INIT_VLC_STATIC(&h261_mv_vlc, H261_MV_VLC_BITS, 17,
-                        &ff_h261_mv_tab[0][1], 2, 1,
-                        &ff_h261_mv_tab[0][0], 2, 1, 144);
-        INIT_VLC_STATIC(&h261_cbp_vlc, H261_CBP_VLC_BITS, 63,
-                        &ff_h261_cbp_tab[0][1], 2, 1,
-                        &ff_h261_cbp_tab[0][0], 2, 1, 512);
-        INIT_VLC_RL(ff_h261_rl_tcoeff, 552);
-    }
+    INIT_VLC_STATIC(&h261_mba_vlc, H261_MBA_VLC_BITS, 35,
+                    ff_h261_mba_bits, 1, 1,
+                    ff_h261_mba_code, 1, 1, 540);
+    INIT_VLC_STATIC(&h261_mtype_vlc, H261_MTYPE_VLC_BITS, 10,
+                    ff_h261_mtype_bits, 1, 1,
+                    ff_h261_mtype_code, 1, 1, 80);
+    INIT_VLC_STATIC(&h261_mv_vlc, H261_MV_VLC_BITS, 17,
+                    &ff_h261_mv_tab[0][1], 2, 1,
+                    &ff_h261_mv_tab[0][0], 2, 1, 144);
+    INIT_VLC_STATIC(&h261_cbp_vlc, H261_CBP_VLC_BITS, 63,
+                    &ff_h261_cbp_tab[0][1], 2, 1,
+                    &ff_h261_cbp_tab[0][0], 2, 1, 512);
+    INIT_FIRST_VLC_RL(ff_h261_rl_tcoeff, 552);
 }
 
 static av_cold int h261_decode_init(AVCodecContext *avctx)
 {
+    static AVOnce init_static_once = AV_ONCE_INIT;
     H261Context *h          = avctx->priv_data;
     MpegEncContext *const s = &h->s;
 
     // set defaults
-    ff_mpv_decode_defaults(s);
-    s->avctx       = avctx;
-    s->width       = s->avctx->coded_width;
-    s->height      = s->avctx->coded_height;
-    s->codec_id    = s->avctx->codec->id;
+    ff_mpv_decode_init(s, avctx);
+
     s->out_format  = FMT_H261;
     s->low_delay   = 1;
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    s->codec_id    = avctx->codec->id;
-
-    ff_h261_common_init();
-    h261_decode_init_vlc(h);
 
     h->gob_start_code_skipped = 0;
+
+    ff_thread_once(&init_static_once, h261_decode_init_static);
 
     return 0;
 }
@@ -219,7 +211,14 @@ static int h261_decode_mb_skipped(H261Context *h, int mba1, int mba2)
         s->mb_skipped                  = 1;
         h->mtype                      &= ~MB_TYPE_H261_FIL;
 
-        ff_mpv_decode_mb(s, s->block);
+        if (s->current_picture.motion_val[0]) {
+            int b_stride = 2*s->mb_width + 1;
+            int b_xy     = 2 * s->mb_x + (2 * s->mb_y) * b_stride;
+            s->current_picture.motion_val[0][b_xy][0] = s->mv[0][0][0];
+            s->current_picture.motion_val[0][b_xy][1] = s->mv[0][0][1];
+        }
+
+        ff_mpv_reconstruct_mb(s, s->block);
     }
 
     return 0;
@@ -258,7 +257,7 @@ static int decode_mv_component(GetBitContext *gb, int v)
 static int h261_decode_block(H261Context *h, int16_t *block, int n, int coded)
 {
     MpegEncContext *const s = &h->s;
-    int code, level, i, j, run;
+    int level, i, j, run;
     RLTable *rl = &ff_h261_rl_tcoeff;
     const uint8_t *scan_table;
 
@@ -303,39 +302,47 @@ static int h261_decode_block(H261Context *h, int16_t *block, int n, int coded)
         s->block_last_index[n] = i - 1;
         return 0;
     }
+    {
+    OPEN_READER(re, &s->gb);
+    i--; // offset by -1 to allow direct indexing of scan_table
     for (;;) {
-        code = get_vlc2(&s->gb, rl->vlc.table, TCOEFF_VLC_BITS, 2);
-        if (code < 0) {
-            av_log(s->avctx, AV_LOG_ERROR, "illegal ac vlc code at %dx%d\n",
-                   s->mb_x, s->mb_y);
-            return -1;
-        }
-        if (code == rl->n) {
+        UPDATE_CACHE(re, &s->gb);
+        GET_RL_VLC(level, run, re, &s->gb, rl->rl_vlc[0], TCOEFF_VLC_BITS, 2, 0);
+        if (run == 66) {
+            if (level) {
+                CLOSE_READER(re, &s->gb);
+                av_log(s->avctx, AV_LOG_ERROR, "illegal ac vlc code at %dx%d\n",
+                       s->mb_x, s->mb_y);
+                return -1;
+            }
             /* escape */
             /* The remaining combinations of (run, level) are encoded with a
              * 20-bit word consisting of 6 bits escape, 6 bits run and 8 bits
              * level. */
-            run   = get_bits(&s->gb, 6);
-            level = get_sbits(&s->gb, 8);
-        } else if (code == 0) {
+            run   = SHOW_UBITS(re, &s->gb, 6) + 1;
+            SKIP_CACHE(re, &s->gb, 6);
+            level = SHOW_SBITS(re, &s->gb, 8);
+            SKIP_COUNTER(re, &s->gb, 6 + 8);
+        } else if (level == 0) {
             break;
         } else {
-            run   = rl->table_run[code];
-            level = rl->table_level[code];
-            if (get_bits1(&s->gb))
+            if (SHOW_UBITS(re, &s->gb, 1))
                 level = -level;
+            SKIP_COUNTER(re, &s->gb, 1);
         }
         i += run;
         if (i >= 64) {
+            CLOSE_READER(re, &s->gb);
             av_log(s->avctx, AV_LOG_ERROR, "run overflow at %dx%d\n",
                    s->mb_x, s->mb_y);
             return -1;
         }
         j        = scan_table[i];
         block[j] = level;
-        i++;
     }
-    s->block_last_index[n] = i - 1;
+    CLOSE_READER(re, &s->gb);
+    }
+    s->block_last_index[n] = i;
     return 0;
 }
 
@@ -419,7 +426,7 @@ static int h261_decode_mb(H261Context *h)
 
     // Read cbp
     if (HAS_CBP(h->mtype))
-        cbp = get_vlc2(&s->gb, h261_cbp_vlc.table, H261_CBP_VLC_BITS, 2) + 1;
+        cbp = get_vlc2(&s->gb, h261_cbp_vlc.table, H261_CBP_VLC_BITS, 1) + 1;
 
     if (s->mb_intra) {
         s->current_picture.mb_type[xy] = MB_TYPE_INTRA;
@@ -454,7 +461,7 @@ intra:
             s->block_last_index[i] = -1;
     }
 
-    ff_mpv_decode_mb(s, s->block);
+    ff_mpv_reconstruct_mb(s, s->block);
 
     return SLICE_OK;
 }
@@ -487,7 +494,7 @@ static int h261_decode_picture_header(H261Context *h)
         i += 32;
     s->picture_number = (s->picture_number & ~31) + i;
 
-    s->avctx->time_base      = (AVRational) { 1001, 30000 };
+    s->avctx->framerate = (AVRational) { 30000, 1001 };
 
     /* PTYPE starts here */
     skip_bits1(&s->gb); /* split screen off */
@@ -580,10 +587,8 @@ static int h261_decode_frame(AVCodecContext *avctx, void *data,
     int ret;
     AVFrame *pict = data;
 
-    av_dlog(avctx, "*****frame %d size=%d\n", avctx->frame_number, buf_size);
-    av_dlog(avctx, "bytes=%x %x %x %x\n", buf[0], buf[1], buf[2], buf[3]);
-    s->flags  = avctx->flags;
-    s->flags2 = avctx->flags2;
+    ff_dlog(avctx, "*****frame %d size=%d\n", avctx->frame_number, buf_size);
+    ff_dlog(avctx, "bytes=%x %x %x %x\n", buf[0], buf[1], buf[2], buf[3]);
 
     h->gob_start_code_skipped = 0;
 
@@ -591,7 +596,7 @@ retry:
     init_get_bits(&s->gb, buf, buf_size * 8);
 
     if (!s->context_initialized)
-        // we need the IDCT permutaton for reading a custom matrix
+        // we need the IDCT permutation for reading a custom matrix
         ff_mpv_idct_init(s);
 
     ret = h261_decode_picture_header(h);
@@ -603,10 +608,7 @@ retry:
     }
 
     if (s->width != avctx->coded_width || s->height != avctx->coded_height) {
-        ParseContext pc = s->parse_context; // FIXME move this demuxing hack to libavformat
-        s->parse_context.buffer = 0;
         ff_mpv_common_end(s);
-        s->parse_context = pc;
     }
 
     if (!s->context_initialized) {
@@ -675,6 +677,7 @@ AVCodec ff_h261_decoder = {
     .init           = h261_decode_init,
     .close          = h261_decode_end,
     .decode         = h261_decode_frame,
-    .capabilities   = CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
     .max_lowres     = 3,
 };

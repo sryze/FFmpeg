@@ -26,11 +26,13 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/opt.h"
+
 #include "internal.h"
+#include "qp_table.h"
 
 #include "libpostproc/postprocess.h"
 
-typedef struct {
+typedef struct PPFilterContext {
     const AVClass *class;
     char *subfilters;
     int mode_id;
@@ -75,15 +77,21 @@ static int pp_process_command(AVFilterContext *ctx, const char *cmd, const char 
 
 static int pp_query_formats(AVFilterContext *ctx)
 {
-    static const enum PixelFormat pix_fmts[] = {
+    static const enum AVPixelFormat pix_fmts[] = {
         AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVJ420P,
         AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVJ422P,
         AV_PIX_FMT_YUV411P,
+        AV_PIX_FMT_GBRP,
         AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
+        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUVJ440P,
+        AV_PIX_FMT_GRAY8,
         AV_PIX_FMT_NONE
     };
-    ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
-    return 0;
+
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (!fmts_list)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static int pp_config_props(AVFilterLink *inlink)
@@ -92,13 +100,17 @@ static int pp_config_props(AVFilterLink *inlink)
     PPFilterContext *pp = inlink->dst->priv;
 
     switch (inlink->format) {
+    case AV_PIX_FMT_GRAY8:
     case AV_PIX_FMT_YUVJ420P:
     case AV_PIX_FMT_YUV420P: flags |= PP_FORMAT_420; break;
     case AV_PIX_FMT_YUVJ422P:
     case AV_PIX_FMT_YUV422P: flags |= PP_FORMAT_422; break;
     case AV_PIX_FMT_YUV411P: flags |= PP_FORMAT_411; break;
+    case AV_PIX_FMT_GBRP:
     case AV_PIX_FMT_YUVJ444P:
     case AV_PIX_FMT_YUV444P: flags |= PP_FORMAT_444; break;
+    case AV_PIX_FMT_YUVJ440P:
+    case AV_PIX_FMT_YUV440P: flags |= PP_FORMAT_440; break;
     default: av_assert0(0);
     }
 
@@ -116,8 +128,9 @@ static int pp_filter_frame(AVFilterLink *inlink, AVFrame *inbuf)
     const int aligned_w = FFALIGN(outlink->w, 8);
     const int aligned_h = FFALIGN(outlink->h, 8);
     AVFrame *outbuf;
-    int qstride, qp_type;
-    int8_t *qp_table ;
+    int qstride = 0;
+    int8_t *qp_table = NULL;
+    int ret;
 
     outbuf = ff_get_video_buffer(outlink, aligned_w, aligned_h);
     if (!outbuf) {
@@ -127,7 +140,13 @@ static int pp_filter_frame(AVFilterLink *inlink, AVFrame *inbuf)
     av_frame_copy_props(outbuf, inbuf);
     outbuf->width  = inbuf->width;
     outbuf->height = inbuf->height;
-    qp_table = av_frame_get_qp_table(inbuf, &qstride, &qp_type);
+
+    ret = ff_qp_table_extract(inbuf, &qp_table, &qstride, NULL, NULL);
+    if (ret < 0) {
+        av_frame_free(&inbuf);
+        av_frame_free(&outbuf);
+        return ret;
+    }
 
     pp_postprocess((const uint8_t **)inbuf->data, inbuf->linesize,
                    outbuf->data,                 outbuf->linesize,
@@ -136,9 +155,10 @@ static int pp_filter_frame(AVFilterLink *inlink, AVFrame *inbuf)
                    qstride,
                    pp->modes[pp->mode_id],
                    pp->pp_ctx,
-                   outbuf->pict_type | (qp_type ? PP_PICT_TYPE_QP2 : 0));
+                   outbuf->pict_type | (qp_table ? PP_PICT_TYPE_QP2 : 0));
 
     av_frame_free(&inbuf);
+    av_freep(&qp_table);
     return ff_filter_frame(outlink, outbuf);
 }
 

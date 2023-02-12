@@ -95,9 +95,11 @@ typedef struct FLACFrameInfo {
  * @param[out] avctx   codec context to set basic stream parameters
  * @param[out] s       where parsed information is stored
  * @param[in]  buffer  pointer to start of 34-byte streaminfo data
+ *
+ * @return negative error code on faiure or >= 0 on success
  */
-void avpriv_flac_parse_streaminfo(AVCodecContext *avctx, struct FLACStreaminfo *s,
-                                  const uint8_t *buffer);
+int ff_flac_parse_streaminfo(AVCodecContext *avctx, struct FLACStreaminfo *s,
+                              const uint8_t *buffer);
 
 /**
  * Validate the FLAC extradata.
@@ -106,9 +108,9 @@ void avpriv_flac_parse_streaminfo(AVCodecContext *avctx, struct FLACStreaminfo *
  * @param[out] streaminfo_start pointer to start of 34-byte STREAMINFO data.
  * @return 1 if valid, 0 if not valid.
  */
-int avpriv_flac_is_extradata_valid(AVCodecContext *avctx,
-                                   enum FLACExtradataFormat *format,
-                                   uint8_t **streaminfo_start);
+int ff_flac_is_extradata_valid(AVCodecContext *avctx,
+                               enum FLACExtradataFormat *format,
+                               uint8_t **streaminfo_start);
 
 /**
  * Calculate an estimate for the maximum frame size based on verbatim mode.

@@ -59,11 +59,10 @@ typedef struct FlashSVContext {
     uint8_t        *previous_frame;
     int             image_width, image_height;
     int             block_width, block_height;
-    uint8_t        *tmpblock;
     uint8_t        *encbuffer;
     int             block_size;
-    z_stream        zstream;
     int             last_key_frame;
+    uint8_t         tmpblock[3 * 256 * 256];
 } FlashSVContext;
 
 static int copy_region_enc(uint8_t *sptr, uint8_t *dptr, int dx, int dy,
@@ -92,13 +91,8 @@ static av_cold int flashsv_encode_end(AVCodecContext *avctx)
 {
     FlashSVContext *s = avctx->priv_data;
 
-    deflateEnd(&s->zstream);
-
-    av_free(s->encbuffer);
-    av_free(s->previous_frame);
-    av_free(s->tmpblock);
-
-    av_frame_free(&avctx->coded_frame);
+    av_freep(&s->encbuffer);
+    av_freep(&s->previous_frame);
 
     return 0;
 }
@@ -111,29 +105,19 @@ static av_cold int flashsv_encode_init(AVCodecContext *avctx)
 
     if (avctx->width > 4095 || avctx->height > 4095) {
         av_log(avctx, AV_LOG_ERROR,
-               "Input dimensions too large, input must be max 4096x4096 !\n");
+               "Input dimensions too large, input must be max 4095x4095 !\n");
         return AVERROR_INVALIDDATA;
     }
-
-    // Needed if zlib unused or init aborted before deflateInit
-    memset(&s->zstream, 0, sizeof(z_stream));
 
     s->last_key_frame = 0;
 
     s->image_width  = avctx->width;
     s->image_height = avctx->height;
 
-    s->tmpblock  = av_mallocz(3 * 256 * 256);
     s->encbuffer = av_mallocz(s->image_width * s->image_height * 3);
 
-    if (!s->tmpblock || !s->encbuffer) {
+    if (!s->encbuffer) {
         av_log(avctx, AV_LOG_ERROR, "Memory allocation failed.\n");
-        return AVERROR(ENOMEM);
-    }
-
-    avctx->coded_frame = av_frame_alloc();
-    if (!avctx->coded_frame) {
-        flashsv_encode_end(avctx);
         return AVERROR(ENOMEM);
     }
 
@@ -151,7 +135,7 @@ static int encode_bitstream(FlashSVContext *s, const AVFrame *p, uint8_t *buf,
     int buf_pos, res;
     int pred_blocks = 0;
 
-    init_put_bits(&pb, buf, buf_size * 8);
+    init_put_bits(&pb, buf, buf_size);
 
     put_bits(&pb,  4, block_width / 16 - 1);
     put_bits(&pb, 12, s->image_width);
@@ -190,14 +174,13 @@ static int encode_bitstream(FlashSVContext *s, const AVFrame *p, uint8_t *buf,
                 ret = compress2(ptr + 2, &zsize, s->tmpblock,
                                 3 * cur_blk_width * cur_blk_height, 9);
 
-                //ret = deflateReset(&s->zstream);
                 if (ret != Z_OK)
                     av_log(s->avctx, AV_LOG_ERROR,
                            "error while compressing block %dx%d\n", i, j);
 
                 bytestream_put_be16(&ptr, zsize);
                 buf_pos += zsize + 2;
-                av_dlog(s->avctx, "buf_pos = %d\n", buf_pos);
+                ff_dlog(s->avctx, "buf_pos = %d\n", buf_pos);
             } else {
                 pred_blocks++;
                 bytestream_put_be16(&ptr, 0);
@@ -246,7 +229,7 @@ static int flashsv_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         I_frame = 1;
     }
 
-    if ((res = ff_alloc_packet2(avctx, pkt, s->image_width * s->image_height * 3)) < 0)
+    if ((res = ff_alloc_packet2(avctx, pkt, s->image_width * s->image_height * 3, 0)) < 0)
         return res;
 
     pkt->size = encode_bitstream(s, p, pkt->data, pkt->size, opt_w * 16, opt_h * 16,
@@ -262,16 +245,24 @@ static int flashsv_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     //mark the frame type so the muxer can mux it correctly
     if (I_frame) {
+#if FF_API_CODED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
         avctx->coded_frame->pict_type      = AV_PICTURE_TYPE_I;
         avctx->coded_frame->key_frame      = 1;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
         s->last_key_frame = avctx->frame_number;
-        av_dlog(avctx, "Inserting keyframe at frame %d\n", avctx->frame_number);
+        ff_dlog(avctx, "Inserting keyframe at frame %d\n", avctx->frame_number);
     } else {
+#if FF_API_CODED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
         avctx->coded_frame->pict_type = AV_PICTURE_TYPE_P;
         avctx->coded_frame->key_frame = 0;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
     }
 
-    if (avctx->coded_frame->key_frame)
+    if (I_frame)
         pkt->flags |= AV_PKT_FLAG_KEY;
     *got_packet = 1;
 

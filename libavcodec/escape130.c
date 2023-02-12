@@ -21,8 +21,9 @@
 
 #include "libavutil/attributes.h"
 #include "libavutil/mem.h"
-#include "avcodec.h"
+
 #define BITSTREAM_READER_LE
+#include "avcodec.h"
 #include "get_bits.h"
 #include "internal.h"
 
@@ -127,9 +128,6 @@ static av_cold int escape130_decode_init(AVCodecContext *avctx)
     s->buf1      = av_malloc(avctx->width * avctx->height * 3 / 2);
     s->buf2      = av_malloc(avctx->width * avctx->height * 3 / 2);
     if (!s->old_y_avg || !s->buf1 || !s->buf2) {
-        av_freep(&s->old_y_avg);
-        av_freep(&s->buf1);
-        av_freep(&s->buf2);
         av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
         return AVERROR(ENOMEM);
     }
@@ -335,7 +333,7 @@ static int escape130_decode_frame(AVCodecContext *avctx, void *data,
         new_cr += new_cr_stride;
     }
 
-    av_dlog(avctx, "Frame data: provided %d bytes, used %d bytes\n",
+    ff_dlog(avctx, "Frame data: provided %d bytes, used %d bytes\n",
             buf_size, get_bits_count(&gb) >> 3);
 
     FFSWAP(uint8_t*, s->old_y, s->new_y);
@@ -356,5 +354,6 @@ AVCodec ff_escape130_decoder = {
     .init           = escape130_decode_init,
     .close          = escape130_decode_close,
     .decode         = escape130_decode_frame,
-    .capabilities   = CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

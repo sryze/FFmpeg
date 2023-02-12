@@ -22,22 +22,12 @@
 
 #include <inttypes.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/float_dsp.h"
 #include "avcodec.h"
 #include "acelp_vectors.h"
 
-const uint8_t ff_fc_2pulses_9bits_track1[16] =
-{
-    1,  3,
-    6,  8,
-    11, 13,
-    16, 18,
-    21, 23,
-    26, 28,
-    31, 33,
-    36, 38
-};
 const uint8_t ff_fc_2pulses_9bits_track1_gray[16] =
 {
   1,  3,
@@ -240,6 +230,7 @@ void ff_set_fixed_vector(float *out, const AMRFixed *in, float scale, int size)
         float y = in->y[i] * scale;
 
         if (in->pitch_lag > 0)
+            av_assert0(x < size);
             do {
                 out[x] += y;
                 y *= in->pitch_fac;

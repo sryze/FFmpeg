@@ -27,6 +27,10 @@
 #include "avcodec.h"
 #include "internal.h"
 
+#ifndef LIBILBC_VERSION_MAJOR
+#define LIBILBC_VERSION_MAJOR 2
+#endif
+
 static int get_mode(AVCodecContext *avctx)
 {
     if (avctx->block_align == 38)
@@ -41,7 +45,11 @@ static int get_mode(AVCodecContext *avctx)
 
 typedef struct ILBCDecContext {
     const AVClass *class;
+#if LIBILBC_VERSION_MAJOR < 3
     iLBC_Dec_Inst_t decoder;
+#else
+    IlbcDecoder decoder;
+#endif
     int enhance;
 } ILBCDecContext;
 
@@ -87,7 +95,12 @@ static int ilbc_decode_frame(AVCodecContext *avctx, void *data,
     int ret;
 
     if (s->decoder.no_of_bytes > buf_size) {
+#if LIBILBC_VERSION_MAJOR < 3
         av_log(avctx, AV_LOG_ERROR, "iLBC frame too short (%u, should be %u)\n",
+#else
+        av_log(avctx, AV_LOG_ERROR, "iLBC frame too short (%u, should be "
+                                    "%"SIZE_SPECIFIER")\n",
+#endif
                buf_size, s->decoder.no_of_bytes);
         return AVERROR_INVALIDDATA;
     }
@@ -96,8 +109,7 @@ static int ilbc_decode_frame(AVCodecContext *avctx, void *data,
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
 
-    WebRtcIlbcfix_DecodeImpl((WebRtc_Word16*) frame->data[0],
-                             (const WebRtc_UWord16*) buf, &s->decoder, 1);
+    WebRtcIlbcfix_DecodeImpl((int16_t *) frame->data[0], (const uint16_t *) buf, &s->decoder, 1);
 
     *got_frame_ptr = 1;
 
@@ -112,13 +124,17 @@ AVCodec ff_libilbc_decoder = {
     .priv_data_size = sizeof(ILBCDecContext),
     .init           = ilbc_decode_init,
     .decode         = ilbc_decode_frame,
-    .capabilities   = CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_CHANNEL_CONF,
     .priv_class     = &ilbc_dec_class,
 };
 
 typedef struct ILBCEncContext {
     const AVClass *class;
+#if LIBILBC_VERSION_MAJOR < 3
     iLBC_Enc_Inst_t encoder;
+#else
+    IlbcEncoder encoder;
+#endif
     int mode;
 } ILBCEncContext;
 
@@ -167,10 +183,10 @@ static int ilbc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     ILBCEncContext *s = avctx->priv_data;
     int ret;
 
-    if ((ret = ff_alloc_packet2(avctx, avpkt, 50)) < 0)
+    if ((ret = ff_alloc_packet2(avctx, avpkt, 50, 0)) < 0)
         return ret;
 
-    WebRtcIlbcfix_EncodeImpl((WebRtc_UWord16*) avpkt->data, (const WebRtc_Word16*) frame->data[0], &s->encoder);
+    WebRtcIlbcfix_EncodeImpl((uint16_t *) avpkt->data, (const int16_t *) frame->data[0], &s->encoder);
 
     avpkt->size     = s->encoder.no_of_bytes;
     *got_packet_ptr = 1;
@@ -194,4 +210,5 @@ AVCodec ff_libilbc_encoder = {
                                                      AV_SAMPLE_FMT_NONE },
     .defaults       = ilbc_encode_defaults,
     .priv_class     = &ilbc_enc_class,
+    .wrapper_name   = "libbilbc",
 };

@@ -1,51 +1,15 @@
- ┌───────────────────────────────────────────┐
- │ RELEASE NOTES for FFmpeg <next> "FIXME"   │
- └───────────────────────────────────────────┘
 
-   The FFmpeg Project proudly presents FFmpeg <next> "FIXME", ...
+              ┌────────────────────────────────────┐
+              │ RELEASE NOTES for FFmpeg 4.4 "Rao" │
+              └────────────────────────────────────┘
 
-   ┌────────────────────────────┐
-   │ *  API Information         │
-   └────────────────────────────┘
+   The FFmpeg Project proudly presents FFmpeg 4.4 "Rao", about 10
+   months after the release of FFmpeg 4.3.
 
-     FFmpeg <next> includes the following library versions:
+   A complete Changelog is available at the root of the project, and the
+   complete Git history on https://git.ffmpeg.org/gitweb/ffmpeg.git
 
-       • libavutil      xx.yy.1zz
-       • libavcodec     xx.yy.1zz
-       • libavformat    xx.yy.1zz
-       • libavdevice    xx.yy.1zz
-       • libavfilter    xx.yy.1zz
-       • libswscale     xx.yy.1zz
-       • libswresample  xx.yy.1zz
-       • libpostproc    xx.yy.1zz
-
-     Please refer to the doc/APIChanges file for more information.
-
- ┌────────────────────────────┐
- │ ★  List of New Features    │
- └────────────────────────────┘
-
-   ┌────────────────────────────┐
-   │ libavformat                │
-   └────────────────────────────┘
-
-    • Icecast protocol
-
-   ┌────────────────────────────┐
-   │ libavfilter                │
-   └────────────────────────────┘
-
-    • ported lenscorrection filter from frei0r filter
-    • large optimizations in dctdnoiz to make it usable
-
-   ┌────────────────────────────┐
-   │ libavutil                  │
-   └────────────────────────────┘
-
-    • added clip() function in eval
-
- ┌────────────────────────────┐
- │ ⚠  Behaviour changes       │
- └────────────────────────────┘
-
-  • dctdnoiz filter now uses a block size of 8x8 instead of 16x16 by default
+   We hope you will like this release as much as we enjoyed working on it, and
+   as usual, if you have any questions about it, or any FFmpeg related topic,
+   feel free to join us on the #ffmpeg IRC channel (on irc.libera.chat) or ask
+   on the mailing-lists.

@@ -25,11 +25,13 @@
 #include <stdio.h>
 
 #include "config.h"
+
 #include "libavutil/attributes.h"
 #include "libavutil/cpu.h"
+#include "libavutil/mem_internal.h"
 #include "libavutil/ppc/cpu.h"
-#include "libavutil/ppc/types_altivec.h"
 #include "libavutil/ppc/util_altivec.h"
+
 #include "libavcodec/mpegvideo.h"
 
 #if HAVE_ALTIVEC
@@ -41,8 +43,6 @@ static void dct_unquantize_h263_altivec(MpegEncContext *s,
 {
     int i, level, qmul, qadd;
     int nCoeffs;
-
-    assert(s->block_last_index[n]>=0);
 
     qadd = (qscale - 1) | 1;
     qmul = qscale << 1;
@@ -59,6 +59,7 @@ static void dct_unquantize_h263_altivec(MpegEncContext *s,
         nCoeffs= 63; //does not always use zigzag table
     } else {
         i = 0;
+        av_assert2(s->block_last_index[n]>=0);
         nCoeffs= s->intra_scantable.raster_end[ s->block_last_index[n] ];
     }
 

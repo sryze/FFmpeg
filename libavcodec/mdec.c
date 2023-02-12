@@ -27,11 +27,12 @@
  * This is very similar to intra-only MPEG-1.
  */
 
+#include "libavutil/mem_internal.h"
+
 #include "avcodec.h"
 #include "blockdsp.h"
 #include "bswapdsp.h"
 #include "idctdsp.h"
-#include "mpegvideo.h"
 #include "mpeg12.h"
 #include "thread.h"
 
@@ -49,7 +50,8 @@ typedef struct MDECContext {
     int mb_width;
     int mb_height;
     int mb_x, mb_y;
-    DECLARE_ALIGNED(16, int16_t, block)[6][64];
+    DECLARE_ALIGNED(32, int16_t, block)[6][64];
+    DECLARE_ALIGNED(16, uint16_t, quant_matrix)[64];
     uint8_t *bitstream_buffer;
     unsigned int bitstream_buffer_size;
     int block_last_index[6];
@@ -62,7 +64,7 @@ static inline int mdec_decode_block_intra(MDECContext *a, int16_t *block, int n)
     int component;
     RLTable *rl = &ff_rl_mpeg1;
     uint8_t * const scantable = a->scantable.permutated;
-    const uint16_t *quant_matrix = ff_mpeg1_default_intra_matrix;
+    const uint16_t *quant_matrix = a->quant_matrix;
     const int qscale = a->qscale;
 
     /* DC coefficient */
@@ -71,10 +73,8 @@ static inline int mdec_decode_block_intra(MDECContext *a, int16_t *block, int n)
     } else {
         component = (n <= 3 ? 0 : n - 4 + 1);
         diff = decode_dc(&a->gb, component);
-        if (diff >= 0xffff)
-            return AVERROR_INVALIDDATA;
         a->last_dc[component] += diff;
-        block[0] = a->last_dc[component] << 3;
+        block[0] = a->last_dc[component] * (1 << 3);
     }
 
     i = 0;
@@ -88,7 +88,12 @@ static inline int mdec_decode_block_intra(MDECContext *a, int16_t *block, int n)
             if (level == 127) {
                 break;
             } else if (level != 0) {
-                i    += run;
+                i += run;
+                if (i > 63) {
+                    av_log(a->avctx, AV_LOG_ERROR,
+                           "ac-tex damaged at %d %d\n", a->mb_x, a->mb_y);
+                    return AVERROR_INVALIDDATA;
+                }
                 j     = scantable[i];
                 level = (level * qscale * quant_matrix[j]) >> 3;
                 level = (level ^ SHOW_SBITS(re, &a->gb, 1)) - SHOW_SBITS(re, &a->gb, 1);
@@ -98,21 +103,22 @@ static inline int mdec_decode_block_intra(MDECContext *a, int16_t *block, int n)
                 run = SHOW_UBITS(re, &a->gb, 6)+1; LAST_SKIP_BITS(re, &a->gb, 6);
                 UPDATE_CACHE(re, &a->gb);
                 level = SHOW_SBITS(re, &a->gb, 10); SKIP_BITS(re, &a->gb, 10);
-                i    += run;
-                j     = scantable[i];
+                i += run;
+                if (i > 63) {
+                    av_log(a->avctx, AV_LOG_ERROR,
+                           "ac-tex damaged at %d %d\n", a->mb_x, a->mb_y);
+                    return AVERROR_INVALIDDATA;
+                }
+                j = scantable[i];
                 if (level < 0) {
                     level = -level;
-                    level = (level * qscale * quant_matrix[j]) >> 3;
+                    level = (level * (unsigned)qscale * quant_matrix[j]) >> 3;
                     level = (level - 1) | 1;
                     level = -level;
                 } else {
-                    level = (level * qscale * quant_matrix[j]) >> 3;
+                    level = (level * (unsigned)qscale * quant_matrix[j]) >> 3;
                     level = (level - 1) | 1;
                 }
-            }
-            if (i > 63) {
-                av_log(a->avctx, AV_LOG_ERROR, "ac-tex damaged at %d %d\n", a->mb_x, a->mb_y);
-                return AVERROR_INVALIDDATA;
             }
 
             block[j] = level;
@@ -154,7 +160,7 @@ static inline void idct_put(MDECContext *a, AVFrame *frame, int mb_x, int mb_y)
     a->idsp.idct_put(dest_y + 8 * linesize,     linesize, block[2]);
     a->idsp.idct_put(dest_y + 8 * linesize + 8, linesize, block[3]);
 
-    if (!(a->avctx->flags & CODEC_FLAG_GRAY)) {
+    if (!(a->avctx->flags & AV_CODEC_FLAG_GRAY)) {
         a->idsp.idct_put(dest_cb, frame->linesize[1], block[4]);
         a->idsp.idct_put(dest_cr, frame->linesize[2], block[5]);
     }
@@ -207,6 +213,7 @@ static int decode_frame(AVCodecContext *avctx,
 static av_cold int decode_init(AVCodecContext *avctx)
 {
     MDECContext * const a = avctx->priv_data;
+    int i;
 
     a->mb_width  = (avctx->coded_width  + 15) / 16;
     a->mb_height = (avctx->coded_height + 15) / 16;
@@ -220,19 +227,15 @@ static av_cold int decode_init(AVCodecContext *avctx)
     ff_init_scantable(a->idsp.idct_permutation, &a->scantable,
                       ff_zigzag_direct);
 
-    if (avctx->idct_algo == FF_IDCT_AUTO)
-        avctx->idct_algo = FF_IDCT_SIMPLE;
     avctx->pix_fmt  = AV_PIX_FMT_YUVJ420P;
     avctx->color_range = AVCOL_RANGE_JPEG;
 
-    return 0;
-}
+    /* init q matrix */
+    for (i = 0; i < 64; i++) {
+        int j = a->idsp.idct_permutation[i];
 
-static av_cold int decode_init_thread_copy(AVCodecContext *avctx)
-{
-    MDECContext * const a = avctx->priv_data;
-
-    a->avctx           = avctx;
+        a->quant_matrix[j] = ff_mpeg1_default_intra_matrix[i];
+    }
 
     return 0;
 }
@@ -256,6 +259,6 @@ AVCodec ff_mdec_decoder = {
     .init             = decode_init,
     .close            = decode_end,
     .decode           = decode_frame,
-    .capabilities     = CODEC_CAP_DR1 | CODEC_CAP_FRAME_THREADS,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(decode_init_thread_copy)
+    .capabilities     = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .caps_internal    = FF_CODEC_CAP_INIT_THREADSAFE,
 };

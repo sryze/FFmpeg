@@ -23,10 +23,13 @@
 
 #include <pulse/rtclock.h>
 #include <pulse/error.h>
-#include "libavformat/avformat.h"
-#include "libavformat/internal.h"
+
+#include "libavutil/internal.h"
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
+
+#include "libavformat/avformat.h"
+#include "libavformat/internal.h"
 #include "pulse_audio_common.h"
 #include "timefilter.h"
 
@@ -45,9 +48,11 @@ typedef struct PulseData {
     pa_threaded_mainloop *mainloop;
     pa_context *context;
     pa_stream *stream;
+    size_t pa_frame_size;
 
     TimeFilter *timefilter;
     int last_period;
+    int wallclock;
 } PulseData;
 
 
@@ -57,7 +62,7 @@ typedef struct PulseData {
             rerror = AVERROR_EXTERNAL;                          \
             goto label;                                         \
         }                                                       \
-    } while(0);
+    } while (0)
 
 #define CHECK_DEAD_GOTO(p, rerror, label)                               \
     do {                                                                \
@@ -66,7 +71,7 @@ typedef struct PulseData {
             rerror = AVERROR_EXTERNAL;                                  \
             goto label;                                                 \
         }                                                               \
-    } while(0);
+    } while (0)
 
 static void context_state_cb(pa_context *c, void *userdata) {
     PulseData *p = userdata;
@@ -144,6 +149,10 @@ static av_cold int pulse_read_header(AVFormatContext *s)
                                 pd->channels };
 
     pa_buffer_attr attr = { -1 };
+    pa_channel_map cmap;
+    const pa_buffer_attr *queried_attr;
+
+    pa_channel_map_init_extend(&cmap, pd->channels, PA_CHANNEL_MAP_WAVEEX);
 
     st = avformat_new_stream(s, NULL);
 
@@ -154,8 +163,8 @@ static av_cold int pulse_read_header(AVFormatContext *s)
 
     attr.fragsize = pd->fragment_size;
 
-    if (s->filename[0] != '\0' && strcmp(s->filename, "default"))
-        device = s->filename;
+    if (s->url[0] != '\0' && strcmp(s->url, "default"))
+        device = s->url;
 
     if (!(pd->mainloop = pa_threaded_mainloop_new())) {
         pulse_close(s);
@@ -198,7 +207,7 @@ static av_cold int pulse_read_header(AVFormatContext *s)
         pa_threaded_mainloop_wait(pd->mainloop);
     }
 
-    if (!(pd->stream = pa_stream_new(pd->context, pd->stream_name, &ss, NULL))) {
+    if (!(pd->stream = pa_stream_new(pd->context, pd->stream_name, &ss, &cmap))) {
         ret = AVERROR(pa_context_errno(pd->context));
         goto unlock_and_fail;
     }
@@ -210,7 +219,7 @@ static av_cold int pulse_read_header(AVFormatContext *s)
 
     ret = pa_stream_connect_record(pd->stream, device, &attr,
                                     PA_STREAM_INTERPOLATE_TIMING
-                                    |PA_STREAM_ADJUST_LATENCY
+                                    | (pd->fragment_size == -1 ? PA_STREAM_ADJUST_LATENCY : 0)
                                     |PA_STREAM_AUTO_TIMING_UPDATE);
 
     if (ret < 0) {
@@ -235,17 +244,26 @@ static av_cold int pulse_read_header(AVFormatContext *s)
         pa_threaded_mainloop_wait(pd->mainloop);
     }
 
+    /* Query actual fragment size */
+    queried_attr = pa_stream_get_buffer_attr(pd->stream);
+    if (!queried_attr || queried_attr->fragsize > INT_MAX/100) {
+        ret = AVERROR_EXTERNAL;
+        goto unlock_and_fail;
+    }
+    pd->fragment_size = queried_attr->fragsize;
+    pd->pa_frame_size = pa_frame_size(&ss);
+
     pa_threaded_mainloop_unlock(pd->mainloop);
 
     /* take real parameters */
-    st->codec->codec_type  = AVMEDIA_TYPE_AUDIO;
-    st->codec->codec_id    = codec_id;
-    st->codec->sample_rate = pd->sample_rate;
-    st->codec->channels    = pd->channels;
+    st->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
+    st->codecpar->codec_id    = codec_id;
+    st->codecpar->sample_rate = pd->sample_rate;
+    st->codecpar->channels    = pd->channels;
     avpriv_set_pts_info(st, 64, 1, 1000000);  /* 64 bits pts in us */
 
     pd->timefilter = ff_timefilter_new(1000000.0 / pd->sample_rate,
-                                       1000, 1.5E-6);
+                                       pd->fragment_size / pd->pa_frame_size, 1.5E-6);
 
     if (!pd->timefilter) {
         pulse_close(s);
@@ -270,12 +288,13 @@ static int pulse_read_packet(AVFormatContext *s, AVPacket *pkt)
     int64_t dts;
     pa_usec_t latency;
     int negative;
+    ptrdiff_t pos = 0;
 
     pa_threaded_mainloop_lock(pd->mainloop);
 
     CHECK_DEAD_GOTO(pd, ret, unlock_and_fail);
 
-    while (!read_data) {
+    while (pos < pd->fragment_size) {
         int r;
 
         r = pa_stream_peek(pd->stream, &read_data, &read_length);
@@ -289,42 +308,51 @@ static int pulse_read_packet(AVFormatContext *s, AVPacket *pkt)
                 * silence, but that wouldn't work for compressed streams. */
             r = pa_stream_drop(pd->stream);
             CHECK_SUCCESS_GOTO(ret, r == 0, unlock_and_fail);
+        } else {
+            if (!pos) {
+                if (av_new_packet(pkt, pd->fragment_size) < 0) {
+                    ret = AVERROR(ENOMEM);
+                    goto unlock_and_fail;
+                }
+
+                dts = av_gettime();
+                pa_operation_unref(pa_stream_update_timing_info(pd->stream, NULL, NULL));
+
+                if (pa_stream_get_latency(pd->stream, &latency, &negative) >= 0) {
+                    if (negative) {
+                        dts += latency;
+                    } else
+                        dts -= latency;
+                } else {
+                    av_log(s, AV_LOG_WARNING, "pa_stream_get_latency() failed\n");
+                }
+            }
+            if (pkt->size - pos < read_length) {
+                if (pos)
+                    break;
+                pa_stream_drop(pd->stream);
+                /* Oversized fragment??? */
+                ret = AVERROR_EXTERNAL;
+                goto unlock_and_fail;
+            }
+            memcpy(pkt->data + pos, read_data, read_length);
+            pos += read_length;
+            pa_stream_drop(pd->stream);
         }
     }
 
-    if (av_new_packet(pkt, read_length) < 0) {
-        ret = AVERROR(ENOMEM);
-        goto unlock_and_fail;
-    }
-
-    dts = av_gettime();
-    pa_operation_unref(pa_stream_update_timing_info(pd->stream, NULL, NULL));
-
-    if (pa_stream_get_latency(pd->stream, &latency, &negative) >= 0) {
-        enum AVCodecID codec_id =
-            s->audio_codec_id == AV_CODEC_ID_NONE ? DEFAULT_CODEC_ID : s->audio_codec_id;
-        int frame_size = ((av_get_bits_per_sample(codec_id) >> 3) * pd->channels);
-        int frame_duration = read_length / frame_size;
-
-
-        if (negative) {
-            dts += latency;
-        } else
-            dts -= latency;
-        pkt->pts = ff_timefilter_update(pd->timefilter, dts, pd->last_period);
-
-        pd->last_period = frame_duration;
-    } else {
-        av_log(s, AV_LOG_WARNING, "pa_stream_get_latency() failed\n");
-    }
-
-    memcpy(pkt->data, read_data, read_length);
-    pa_stream_drop(pd->stream);
-
     pa_threaded_mainloop_unlock(pd->mainloop);
+
+    av_shrink_packet(pkt, pos);
+
+    if (pd->wallclock)
+        pkt->pts = ff_timefilter_update(pd->timefilter, dts, pd->last_period);
+    pd->last_period = pkt->size / pd->pa_frame_size;
+
     return 0;
 
 unlock_and_fail:
+    av_packet_unref(pkt);
     pa_threaded_mainloop_unlock(pd->mainloop);
     return ret;
 }
@@ -346,11 +374,12 @@ static const AVOption options[] = {
     { "channels",      "set number of audio channels",                      OFFSET(channels),      AV_OPT_TYPE_INT,    {.i64 = 2},        1, INT_MAX, D },
     { "frame_size",    "set number of bytes per frame",                     OFFSET(frame_size),    AV_OPT_TYPE_INT,    {.i64 = 1024},     1, INT_MAX, D },
     { "fragment_size", "set buffering size, affects latency and cpu usage", OFFSET(fragment_size), AV_OPT_TYPE_INT,    {.i64 = -1},      -1, INT_MAX, D },
+    { "wallclock",     "set the initial pts using the current time",     OFFSET(wallclock),     AV_OPT_TYPE_INT,    {.i64 = 1},       -1, 1, D },
     { NULL },
 };
 
 static const AVClass pulse_demuxer_class = {
-    .class_name     = "Pulse demuxer",
+    .class_name     = "Pulse indev",
     .item_name      = av_default_item_name,
     .option         = options,
     .version        = LIBAVUTIL_VERSION_INT,

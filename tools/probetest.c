@@ -29,6 +29,7 @@
 static int score_array[MAX_FORMATS];
 static int64_t time_array[MAX_FORMATS];
 static int failures = 0;
+static const char *single_format;
 
 #ifndef AV_READ_TIME
 #define AV_READ_TIME(x) 0
@@ -37,12 +38,15 @@ static int failures = 0;
 static void probe(AVProbeData *pd, int type, int p, int size)
 {
     int i = 0;
-    AVInputFormat *fmt = NULL;
+    const AVInputFormat *fmt = NULL;
+    void *fmt_opaque = NULL;
 
-    while ((fmt = av_iformat_next(fmt))) {
+    while ((fmt = av_demuxer_iterate(&fmt_opaque))) {
         if (fmt->flags & AVFMT_NOFILE)
             continue;
-        if (fmt->read_probe) {
+        if (fmt->read_probe &&
+            (!single_format || !strcmp(single_format, fmt->name))
+        ) {
             int score;
             int64_t start = AV_READ_TIME();
             score = fmt->read_probe(pd);
@@ -62,9 +66,10 @@ static void probe(AVProbeData *pd, int type, int p, int size)
 static void print_times(void)
 {
     int i = 0;
-    AVInputFormat *fmt = NULL;
+    const AVInputFormat *fmt = NULL;
+    void *fmt_opaque = NULL;
 
-    while ((fmt = av_iformat_next(fmt))) {
+    while ((fmt = av_demuxer_iterate(&fmt_opaque))) {
         if (fmt->flags & AVFMT_NOFILE)
             continue;
         if (time_array[i] > 1000000) {
@@ -75,6 +80,17 @@ static void print_times(void)
     }
 }
 
+static int read_int(char *arg) {
+    int ret;
+
+    if (!arg || !*arg)
+        return -1;
+    ret = strtol(arg, &arg, 0);
+    if (*arg)
+        return -1;
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
     unsigned int p, i, type, size, retry;
@@ -83,11 +99,22 @@ int main(int argc, char **argv)
     PutBitContext pb;
     int retry_count= 4097;
     int max_size = 65537;
+    int j;
 
-    if(argc >= 2)
-        retry_count = atoi(argv[1]);
-    if(argc >= 3)
-        max_size = atoi(argv[2]);
+    for (j = i = 1; i<argc; i++) {
+        if (!strcmp(argv[i], "-f") && i+1<argc && !single_format) {
+            single_format = argv[++i];
+        } else if (read_int(argv[i])>0 && j == 1) {
+            retry_count = read_int(argv[i]);
+            j++;
+        } else if (read_int(argv[i])>0 && j == 2) {
+            max_size = read_int(argv[i]);
+            j++;
+        } else {
+            fprintf(stderr, "probetest [-f <input format>] [<retry_count> [<max_size>]]\n");
+            return 1;
+        }
+    }
 
     if (max_size > 1000000000U/8) {
         fprintf(stderr, "max_size out of bounds\n");
@@ -98,9 +125,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "retry_count out of bounds\n");
         return 1;
     }
-
-    avcodec_register_all();
-    av_register_all();
 
     av_lfg_init(&state, 0xdeadbeef);
 

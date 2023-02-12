@@ -50,6 +50,8 @@ static av_cold int ulti_decode_init(AVCodecContext *avctx)
     s->width = avctx->width;
     s->height = avctx->height;
     s->blocks = (s->width / 8) * (s->height / 8);
+    if (s->blocks == 0)
+        return AVERROR_INVALIDDATA;
     avctx->pix_fmt = AV_PIX_FMT_YUV410P;
     s->ulti_codebook = ulti_codebook;
 
@@ -60,7 +62,8 @@ static av_cold int ulti_decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-static av_cold int ulti_decode_end(AVCodecContext *avctx){
+static av_cold int ulti_decode_end(AVCodecContext *avctx)
+{
     UltimotionDecodeContext *s = avctx->priv_data;
 
     av_frame_free(&s->frame);
@@ -227,7 +230,7 @@ static int ulti_decode_frame(AVCodecContext *avctx,
     int skip;
     int tmp;
 
-    if ((ret = ff_reget_buffer(avctx, s->frame)) < 0)
+    if ((ret = ff_reget_buffer(avctx, s->frame, 0)) < 0)
         return ret;
 
     bytestream2_init(&s->gb, buf, buf_size);
@@ -382,12 +385,11 @@ static int ulti_decode_frame(AVCodecContext *avctx,
                             Y[3] = bytestream2_get_byteu(&s->gb) & 0x3F;
                             ulti_grad(s->frame, tx, ty, Y, chroma, angle); //draw block
                         } else { // some patterns
-                            int f0, f1;
-                            f0 = bytestream2_get_byteu(&s->gb);
-                            f1 = tmp;
+                            int f0 = tmp;
+                            int f1 = bytestream2_get_byteu(&s->gb);
                             Y[0] = bytestream2_get_byteu(&s->gb) & 0x3F;
                             Y[1] = bytestream2_get_byteu(&s->gb) & 0x3F;
-                            ulti_pattern(s->frame, tx, ty, f1, f0, Y[0], Y[1], chroma);
+                            ulti_pattern(s->frame, tx, ty, f0, f1, Y[0], Y[1], chroma);
                         }
                     }
                     break;
@@ -425,5 +427,6 @@ AVCodec ff_ulti_decoder = {
     .init           = ulti_decode_init,
     .close          = ulti_decode_end,
     .decode         = ulti_decode_frame,
-    .capabilities   = CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };

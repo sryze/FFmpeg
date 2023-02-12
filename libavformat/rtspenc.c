@@ -34,7 +34,6 @@
 #include "libavutil/time.h"
 #include "url.h"
 
-#define SDP_MAX_SIZE 16384
 
 static const AVClass rtsp_muxer_class = {
     .class_name = "RTSP muxer",
@@ -50,6 +49,7 @@ int ff_rtsp_setup_output_streams(AVFormatContext *s, const char *addr)
     int i;
     char *sdp;
     AVFormatContext sdp_ctx, *ctx_array[1];
+    char url[MAX_URL_SIZE];
 
     if (s->start_time_realtime == 0  ||  s->start_time_realtime == AV_NOPTS_VALUE)
         s->start_time_realtime = av_gettime();
@@ -71,7 +71,8 @@ int ff_rtsp_setup_output_streams(AVFormatContext *s, const char *addr)
      * flexible SDP creation interface.
      */
     sdp_ctx = *s;
-    ff_url_join(sdp_ctx.filename, sizeof(sdp_ctx.filename),
+    sdp_ctx.url = url;
+    ff_url_join(url, sizeof(url),
                 "rtsp", NULL, addr, -1, NULL);
     ctx_array[0] = &sdp_ctx;
     if (av_sdp_create(ctx_array, 1, sdp, SDP_MAX_SIZE)) {
@@ -84,7 +85,7 @@ int ff_rtsp_setup_output_streams(AVFormatContext *s, const char *addr)
                                   reply, NULL, sdp, strlen(sdp));
     av_free(sdp);
     if (reply->status_code != RTSP_STATUS_OK)
-        return AVERROR_INVALIDDATA;
+        return ff_rtsp_averror(reply->status_code, AVERROR_INVALIDDATA);
 
     /* Set up the RTSPStreams for each AVStream */
     for (i = 0; i < s->nb_streams; i++) {
@@ -110,13 +111,13 @@ static int rtsp_write_record(AVFormatContext *s)
 {
     RTSPState *rt = s->priv_data;
     RTSPMessageHeader reply1, *reply = &reply1;
-    char cmd[1024];
+    char cmd[MAX_URL_SIZE];
 
     snprintf(cmd, sizeof(cmd),
              "Range: npt=0.000-\r\n");
     ff_rtsp_send_cmd(s, "RECORD", rt->control_uri, cmd, reply, NULL);
     if (reply->status_code != RTSP_STATUS_OK)
-        return -1;
+        return ff_rtsp_averror(reply->status_code, -1);
     rt->state = RTSP_STATE_STREAMING;
     return 0;
 }

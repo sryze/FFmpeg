@@ -26,8 +26,9 @@
 
 SECTION_RODATA
 
+cextern pw_1023
+%define pw_pixel_max_10 pw_1023
 pw_pixel_max_12: times 8 dw ((1 << 12)-1)
-pw_pixel_max_10: times 8 dw ((1 << 10)-1)
 pw_m2:           times 8 dw -2
 pd_1 :           times 4 dd  1
 
@@ -37,11 +38,6 @@ cextern pw_m1
 
 SECTION .text
 INIT_XMM sse2
-
-; expands to [base],...,[base+7*stride]
-%define PASS8ROWS(base, base3, stride, stride3) \
-    [base], [base+stride], [base+stride*2], [base3], \
-    [base3+stride], [base3+stride*2], [base3+stride3], [base3+stride*4]
 
 ; in: 8 rows of 4 bytes in %4..%11
 ; out: 4 rows of 8 words in m0..m3

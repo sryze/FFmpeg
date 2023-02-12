@@ -79,7 +79,7 @@
 #include "lavfutils.h"
 #include "lswsutils.h"
 
-typedef struct {
+typedef struct RemovelogoContext {
     const AVClass *class;
     char *filename;
     /* Stores our collection of masks. The first is for an array of
@@ -114,7 +114,7 @@ AVFILTER_DEFINE_CLASS(removelogo);
  * opinion. This will calculate only at init-time, so you can put a
  * long expression here without effecting performance.
  */
-#define apply_mask_fudge_factor(x) (((x) >> 2) + x)
+#define apply_mask_fudge_factor(x) (((x) >> 2) + (x))
 
 /**
  * Pre-process an image to give distance information.
@@ -206,8 +206,10 @@ static void convert_mask_to_strength_mask(uint8_t *data, int linesize,
 static int query_formats(AVFilterContext *ctx)
 {
     static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE };
-    ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
-    return 0;
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (!fmts_list)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static int load_mask(uint8_t **mask, int *w, int *h,
@@ -340,8 +342,8 @@ static av_cold int init(AVFilterContext *ctx)
 
     /* Calculate our bounding rectangles, which determine in what
      * region the logo resides for faster processing. */
-    ff_calculate_bounding_box(&s->full_mask_bbox, s->full_mask_data, w, w, h, 0);
-    ff_calculate_bounding_box(&s->half_mask_bbox, s->half_mask_data, w/2, w/2, h/2, 0);
+    ff_calculate_bounding_box(&s->full_mask_bbox, s->full_mask_data, w, w, h, 0, 8);
+    ff_calculate_bounding_box(&s->half_mask_bbox, s->half_mask_data, w/2, w/2, h/2, 0, 8);
 
 #define SHOW_LOGO_INFO(mask_type)                                       \
     av_log(ctx, AV_LOG_VERBOSE, #mask_type " x1:%d x2:%d y1:%d y2:%d max_mask_size:%d\n", \

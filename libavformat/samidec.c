@@ -36,13 +36,14 @@ typedef struct {
     FFDemuxSubtitlesQueue q;
 } SAMIContext;
 
-static int sami_probe(AVProbeData *p)
+static int sami_probe(const AVProbeData *p)
 {
-    const unsigned char *ptr = p->buf;
+    char buf[6];
+    FFTextReader tr;
+    ff_text_init_buf(&tr, p->buf, p->buf_size);
+    ff_text_read(&tr, buf, sizeof(buf));
 
-    if (AV_RB24(ptr) == 0xEFBBBF)
-        ptr += 3;  /* skip UTF-8 BOM */
-    return !strncmp(ptr, "<SAMI>", 6) ? AVPROBE_SCORE_MAX : 0;
+    return !strncmp(buf, "<SAMI>", 6) ? AVPROBE_SCORE_MAX : 0;
 }
 
 static int sami_read_header(AVFormatContext *s)
@@ -52,23 +53,31 @@ static int sami_read_header(AVFormatContext *s)
     AVBPrint buf, hdr_buf;
     char c = 0;
     int res = 0, got_first_sync_point = 0;
+    FFTextReader tr;
+    ff_text_init_avio(s, &tr, s->pb);
 
     if (!st)
         return AVERROR(ENOMEM);
     avpriv_set_pts_info(st, 64, 1, 1000);
-    st->codec->codec_type = AVMEDIA_TYPE_SUBTITLE;
-    st->codec->codec_id   = AV_CODEC_ID_SAMI;
+    st->codecpar->codec_type = AVMEDIA_TYPE_SUBTITLE;
+    st->codecpar->codec_id   = AV_CODEC_ID_SAMI;
 
     av_bprint_init(&buf,     0, AV_BPRINT_SIZE_UNLIMITED);
     av_bprint_init(&hdr_buf, 0, AV_BPRINT_SIZE_UNLIMITED);
 
-    while (!avio_feof(s->pb)) {
+    while (!ff_text_eof(&tr)) {
         AVPacket *sub;
-        const int64_t pos = avio_tell(s->pb) - (c != 0);
-        int is_sync, n = ff_smil_extract_next_chunk(s->pb, &buf, &c);
+        const int64_t pos = ff_text_pos(&tr) - (c != 0);
+        int is_sync, is_body, n = ff_smil_extract_next_text_chunk(&tr, &buf, &c);
 
         if (n == 0)
             break;
+
+        is_body = !av_strncasecmp(buf.str, "</BODY", 6);
+        if (is_body) {
+             av_bprint_clear(&buf);
+             break;
+        }
 
         is_sync = !av_strncasecmp(buf.str, "<SYNC", 5);
         if (is_sync)
@@ -80,25 +89,34 @@ static int sami_read_header(AVFormatContext *s)
             sub = ff_subtitles_queue_insert(&sami->q, buf.str, buf.len, !is_sync);
             if (!sub) {
                 res = AVERROR(ENOMEM);
+                av_bprint_finalize(&hdr_buf, NULL);
                 goto end;
             }
             if (is_sync) {
                 const char *p = ff_smil_get_attr_ptr(buf.str, "Start");
                 sub->pos      = pos;
                 sub->pts      = p ? strtol(p, NULL, 10) : 0;
+                if (sub->pts <= INT64_MIN/2 || sub->pts >= INT64_MAX/2) {
+                    res = AVERROR_PATCHWELCOME;
+                    av_bprint_finalize(&hdr_buf, NULL);
+                    goto end;
+                }
+
                 sub->duration = -1;
             }
         }
         av_bprint_clear(&buf);
     }
 
-    res = avpriv_bprint_to_extradata(st->codec, &hdr_buf);
+    res = ff_bprint_to_codecpar_extradata(st->codecpar, &hdr_buf);
     if (res < 0)
         goto end;
 
-    ff_subtitles_queue_finalize(&sami->q);
+    ff_subtitles_queue_finalize(s, &sami->q);
 
 end:
+    if (res < 0)
+        ff_subtitles_queue_clean(&sami->q);
     av_bprint_finalize(&buf, NULL);
     return res;
 }

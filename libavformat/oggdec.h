@@ -84,9 +84,10 @@ struct ogg_stream {
     int got_start;
     int got_data;   ///< 1 if the stream got some data (non-initial packets), 0 otherwise
     int nb_header; ///< set to the number of parsed headers
+    int start_trimming; ///< set the number of packets to drop from the start
     int end_trimming; ///< set the number of packets to drop from the end
     uint8_t *new_metadata;
-    unsigned int new_metadata_size;
+    buffer_size_t new_metadata_size;
     void *private;
 };
 
@@ -160,6 +161,11 @@ ogg_gptopts (AVFormatContext * s, int i, uint64_t gp, int64_t *dts)
         pts = gp;
         if (dts)
             *dts = pts;
+    }
+    if (pts > INT64_MAX && pts != AV_NOPTS_VALUE) {
+        // The return type is unsigned, we thus cannot return negative pts
+        av_log(s, AV_LOG_ERROR, "invalid pts %"PRId64"\n", pts);
+        pts = AV_NOPTS_VALUE;
     }
 
     return pts;

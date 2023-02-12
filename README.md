@@ -30,10 +30,10 @@ such as audio, video, subtitles and related metadata.
 
 ## Tools
 
-* [ffmpeg](http://ffmpeg.org/ffmpeg.html) is a command line toolbox to
+* [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to
   manipulate, convert and stream multimedia content.
-* [ffplay](http://ffmpeg.org/ffplay.html) is a minimalistic multimedia player.
-* [ffprobe](http://ffmpeg.org/ffprobe.html) is a simple analisys tool to inspect
+* [ffplay](https://ffmpeg.org/ffplay.html) is a minimalistic multimedia player.
+* [ffprobe](https://ffmpeg.org/ffprobe.html) is a simple analysis tool to inspect
   multimedia content.
 * Additional small tools such as `aviocat`, `ismindex` and `qt-faststart`.
 
@@ -41,14 +41,20 @@ such as audio, video, subtitles and related metadata.
 
 The offline documentation is available in the **doc/** directory.
 
-The online documentation is available in the main [website](http://ffmpeg.org)
-and in the [wiki](http://trac.ffmpeg.org).
+The online documentation is available in the main [website](https://ffmpeg.org)
+and in the [wiki](https://trac.ffmpeg.org).
 
 ### Examples
 
-Conding examples are available in the **doc/example** directory.
+Coding examples are available in the **doc/examples** directory.
 
 ## License
 
 FFmpeg codebase is mainly LGPL-licensed with optional components licensed under
 GPL. Please refer to the LICENSE file for detailed information.
+
+## Contributing
+
+Patches should be submitted to the ffmpeg-devel mailing list using
+`git format-patch` or `git send-email`. Github pull requests should be
+avoided because they are not part of our review process and will be ignored.

@@ -27,7 +27,7 @@
 #include "avio_internal.h"
 
 /// Two-byte MPC tag
-#define MKMPCTAG(a, b) (a | (b << 8))
+#define MKMPCTAG(a, b) ((a) | ((b) << 8))
 
 #define TAG_MPCK MKTAG('M','P','C','K')
 
@@ -47,7 +47,7 @@ enum MPCPacketTags{
 
 static const int mpc8_rate[8] = { 44100, 48000, 37800, 32000, -1, -1, -1, -1 };
 
-typedef struct {
+typedef struct MPCContext {
     int ver;
     int64_t header_pos;
     int64_t samples;
@@ -57,7 +57,7 @@ typedef struct {
 
 static inline int64_t bs_get_v(const uint8_t **bs)
 {
-    int64_t v = 0;
+    uint64_t v = 0;
     int br = 0;
     int c;
 
@@ -73,7 +73,7 @@ static inline int64_t bs_get_v(const uint8_t **bs)
     return v - br;
 }
 
-static int mpc8_probe(AVProbeData *p)
+static int mpc8_probe(const AVProbeData *p)
 {
     const uint8_t *bs = p->buf + 4;
     const uint8_t *bs_end = bs + p->buf_size;
@@ -91,7 +91,7 @@ static int mpc8_probe(AVProbeData *p)
         size = bs_get_v(&bs);
         if (size < 2)
             return 0;
-        if (bs + size - 2 >= bs_end)
+        if (size >= bs_end - bs + 2)
             return AVPROBE_SCORE_EXTENSION - 1; // seems to be valid MPC but no header yet
         if (header_found) {
             if (size < 11 || size > 28)
@@ -108,7 +108,7 @@ static int mpc8_probe(AVProbeData *p)
 
 static inline int64_t gb_get_v(GetBitContext *gb)
 {
-    int64_t v = 0;
+    uint64_t v = 0;
     int bits = 0;
     while(get_bits1(gb) && bits < 64-7){
         v <<= 7;
@@ -127,7 +127,11 @@ static void mpc8_get_chunk_header(AVIOContext *pb, int *tag, int64_t *size)
     pos = avio_tell(pb);
     *tag = avio_rl16(pb);
     *size = ffio_read_varlen(pb);
-    *size -= avio_tell(pb) - pos;
+    pos -= avio_tell(pb);
+    if (av_sat_add64(*size, pos) != (uint64_t)*size + pos) {
+        *size = -1;
+    } else
+        *size += pos;
 }
 
 static void mpc8_parse_seektable(AVFormatContext *s, int64_t off)
@@ -154,7 +158,7 @@ static void mpc8_parse_seektable(AVFormatContext *s, int64_t off)
         av_log(s, AV_LOG_ERROR, "Bad seek table size\n");
         return;
     }
-    if(!(buf = av_malloc(size + FF_INPUT_BUFFER_PADDING_SIZE)))
+    if(!(buf = av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE)))
         return;
     ret = avio_read(s->pb, buf, size);
     if (ret != size) {
@@ -162,27 +166,38 @@ static void mpc8_parse_seektable(AVFormatContext *s, int64_t off)
         av_free(buf);
         return;
     }
-    memset(buf+size, 0, FF_INPUT_BUFFER_PADDING_SIZE);
+    memset(buf+size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 
     init_get_bits(&gb, buf, size * 8);
     size = gb_get_v(&gb);
     if(size > UINT_MAX/4 || size > c->samples/1152){
         av_log(s, AV_LOG_ERROR, "Seek table is too big\n");
+        av_free(buf);
         return;
     }
     seekd = get_bits(&gb, 4);
     for(i = 0; i < 2; i++){
-        pos = gb_get_v(&gb) + c->header_pos;
+        pos = gb_get_v(&gb);
+        if (av_sat_add64(pos, c->header_pos) != pos + (uint64_t)c->header_pos) {
+            av_free(buf);
+            return;
+        }
+
+        pos += c->header_pos;
         ppos[1 - i] = pos;
         av_add_index_entry(s->streams[0], pos, i, 0, 0, AVINDEX_KEYFRAME);
     }
     for(; i < size; i++){
+        if (get_bits_left(&gb) < 13) {
+            av_free(buf);
+            return;
+        }
         t = get_unary(&gb, 1, 33) << 12;
         t += get_bits(&gb, 12);
         if(t & 1)
             t = -(t & ~1);
-        pos = (t >> 1) + ppos[0]*2 - ppos[1];
-        av_add_index_entry(s->streams[0], pos, i << seekd, 0, 0, AVINDEX_KEYFRAME);
+        pos = (t >> 1) + (uint64_t)ppos[0]*2 - ppos[1];
+        av_add_index_entry(s->streams[0], pos, (int64_t)i << seekd, 0, 0, AVINDEX_KEYFRAME);
         ppos[1] = ppos[0];
         ppos[0] = pos;
     }
@@ -196,8 +211,11 @@ static void mpc8_handle_chunk(AVFormatContext *s, int tag, int64_t chunk_pos, in
 
     switch(tag){
     case TAG_SEEKTBLOFF:
-        pos = avio_tell(pb) + size;
+        pos = avio_tell(pb);
         off = ffio_read_varlen(pb);
+        if (pos > INT64_MAX - size || off < 0 || off > INT64_MAX - chunk_pos)
+            return;
+        pos += size;
         mpc8_parse_seektable(s, chunk_pos + off);
         avio_seek(pb, pos, SEEK_SET);
         break;
@@ -211,7 +229,7 @@ static int mpc8_read_header(AVFormatContext *s)
     MPCContext *c = s->priv_data;
     AVIOContext *pb = s->pb;
     AVStream *st;
-    int tag = 0;
+    int tag = 0, ret;
     int64_t size, pos;
 
     c->header_pos = avio_tell(pb);
@@ -223,6 +241,10 @@ static int mpc8_read_header(AVFormatContext *s)
     while(!avio_feof(pb)){
         pos = avio_tell(pb);
         mpc8_get_chunk_header(pb, &tag, &size);
+        if (size < 0) {
+            av_log(s, AV_LOG_ERROR, "Invalid chunk length\n");
+            return AVERROR_INVALIDDATA;
+        }
         if(tag == TAG_STREAMHDR)
             break;
         mpc8_handle_chunk(s, tag, pos, size);
@@ -235,7 +257,7 @@ static int mpc8_read_header(AVFormatContext *s)
     avio_skip(pb, 4); //CRC
     c->ver = avio_r8(pb);
     if(c->ver != 8){
-        av_log(s, AV_LOG_ERROR, "Unknown stream version %d\n", c->ver);
+        avpriv_report_missing_feature(s, "Stream version %d", c->ver);
         return AVERROR_PATCHWELCOME;
     }
     c->samples = ffio_read_varlen(pb);
@@ -244,23 +266,23 @@ static int mpc8_read_header(AVFormatContext *s)
     st = avformat_new_stream(s, NULL);
     if (!st)
         return AVERROR(ENOMEM);
-    st->codec->codec_type = AVMEDIA_TYPE_AUDIO;
-    st->codec->codec_id = AV_CODEC_ID_MUSEPACK8;
-    st->codec->bits_per_coded_sample = 16;
+    st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    st->codecpar->codec_id = AV_CODEC_ID_MUSEPACK8;
+    st->codecpar->bits_per_coded_sample = 16;
 
-    if (ff_get_extradata(st->codec, pb, 2) < 0)
-        return AVERROR(ENOMEM);
+    if ((ret = ff_get_extradata(s, st->codecpar, pb, 2)) < 0)
+        return ret;
 
-    st->codec->channels = (st->codec->extradata[1] >> 4) + 1;
-    st->codec->sample_rate = mpc8_rate[st->codec->extradata[0] >> 5];
-    avpriv_set_pts_info(st, 32, 1152  << (st->codec->extradata[1]&3)*2, st->codec->sample_rate);
+    st->codecpar->channels = (st->codecpar->extradata[1] >> 4) + 1;
+    st->codecpar->sample_rate = mpc8_rate[st->codecpar->extradata[0] >> 5];
+    avpriv_set_pts_info(st, 64, 1152  << (st->codecpar->extradata[1]&3)*2, st->codecpar->sample_rate);
     st->start_time = 0;
-    st->duration = c->samples / (1152 << (st->codec->extradata[1]&3)*2);
+    st->duration = c->samples / (1152 << (st->codecpar->extradata[1]&3)*2);
     size -= avio_tell(pb) - pos;
     if (size > 0)
         avio_skip(pb, size);
 
-    if (pb->seekable) {
+    if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
         int64_t pos = avio_tell(s->pb);
         c->apetag_start = ff_ape_parse_tag(s);
         avio_seek(s->pb, pos, SEEK_SET);
@@ -272,7 +294,7 @@ static int mpc8_read_header(AVFormatContext *s)
 static int mpc8_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     MPCContext *c = s->priv_data;
-    int tag;
+    int tag, ret;
     int64_t pos, size;
 
     while(!avio_feof(s->pb)){
@@ -283,17 +305,17 @@ static int mpc8_read_packet(AVFormatContext *s, AVPacket *pkt)
             return AVERROR_EOF;
 
         mpc8_get_chunk_header(s->pb, &tag, &size);
-        if (size < 0)
+        if (size < 0 || size > INT_MAX)
             return -1;
         if(tag == TAG_AUDIOPACKET){
-            if(av_get_packet(s->pb, pkt, size) < 0)
-                return AVERROR(ENOMEM);
+            if ((ret = av_get_packet(s->pb, pkt, size)) < 0)
+                return ret;
             pkt->stream_index = 0;
             pkt->duration     = 1;
             return 0;
         }
         if(tag == TAG_STREAMEND)
-            return AVERROR(EIO);
+            return AVERROR_EOF;
         mpc8_handle_chunk(s, tag, pos, size);
     }
     return AVERROR_EOF;

@@ -134,5 +134,6 @@ AVCodec ff_xl_decoder = {
     .id           = AV_CODEC_ID_VIXL,
     .init         = decode_init,
     .decode       = decode_frame,
-    .capabilities = CODEC_CAP_DR1,
+    .capabilities = AV_CODEC_CAP_DR1,
+    .caps_internal = FF_CODEC_CAP_INIT_THREADSAFE,
 };
