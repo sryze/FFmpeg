@@ -22,9 +22,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stropts.h>
 #include <sys/mman.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include "ve.h"
 
 #define LOCKFILE "/tmp/cedar_dev.lck"
